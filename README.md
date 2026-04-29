@@ -101,6 +101,13 @@ ascii      CX gpt-5.5 [########--] 80.7% $0.127/$7.50 main +11
 
 More options and rationale live in [docs/style-gallery.md](docs/style-gallery.md).
 
+## Roadmap
+
+CodexHUD is the Codex adapter seed for a broader local-first AI CLI spend
+ledger. The proposed multi-CLI path, adapter contract, alerting features,
+pricing registry, and distribution plan are in
+[docs/multi-cli-roadmap.md](docs/multi-cli-roadmap.md).
+
 ## tmux
 
 One-line status-right example:
@@ -158,6 +165,7 @@ config/prices.json       default editable price config
 tmux/codexhud.tmux       tmux plugin-style entrypoint
 docs/style-gallery.md    visual directions and examples
 docs/naming.md           name search notes and alternatives
+docs/multi-cli-roadmap.md multi-CLI adapter and spend-ledger roadmap
 examples/codexhud.json   sample JSON output shape
 scripts/check.sh        local smoke checks
 ```
