@@ -11,5 +11,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update
       - run: sudo apt-get install -y shellcheck jq git
-      - run: CODEXHUD_REQUIRE_SHELLCHECK=1 ./scripts/check.sh
-
+      - run: TOKENHUD_REQUIRE_SHELLCHECK=1 ./scripts/check.sh

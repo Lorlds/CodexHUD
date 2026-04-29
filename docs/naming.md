@@ -1,30 +1,39 @@
 # Naming Notes
 
-Checked on 2026-04-29.
+## Final Choice: TokenHUD
 
-## Final Choice: CodexHUD
+`TokenHUD` is the selected product name.
 
-`CodexHUD` is the selected name.
+Why:
 
-- Exact npm package name `codexhud` returned 404.
-- Exact PyPI project name `codexhud` returned 404.
-- Public web search did not show a clear same-name Codex usage project.
-- Related uses of "HUD" exist, including HUD.ai Codex documentation and
-  Codex ecosystem tools with HUD features, but these are not exact `CodexHUD`
-  name collisions.
+- It is vendor-neutral and can cover Codex, Claude Code, Aider, Cursor, and local
+  inference.
+- It keeps the strongest concept from the original project: a lightweight HUD
+  for token and spend telemetry.
+- It leaves room for non-statusline features such as alerts, daily summaries,
+  CSV export, and a multi-provider price registry.
+- It is short enough for a CLI command: `tokenhud`.
 
-Command: `codexhud`
+## Compatibility
 
-## Rejected Names
+`CodexHUD` remains as the Codex adapter alias:
 
-Names that were checked and rejected because public projects already use them
-for similar developer tooling:
+```text
+tokenhud              main command
+tokenhud adapters     supported/planned adapter list
+codexhud              compatibility alias for tokenhud
+```
 
-- `CodexBar`
-- `CodexLens`
+The transition keeps:
 
-Names that were checked and rejected because they are public names already in
-use, even if the exact package names were not occupied:
+- `codexhud` command wrapper.
+- `tmux/codexhud.tmux` wrapper.
+- `CODEXHUD_*` environment variable compatibility when `TOKENHUD_*` is unset.
+- Legacy `~/.codexhud/prices.json` fallback when `~/.tokenhud/prices.json` has
+  not been created yet.
 
-- `CodexPulse`
-- `CodexBeat`
+## Earlier Name
+
+The project launched as `CodexHUD` because the first implemented adapter reads
+Codex session telemetry. The broader product direction is now TokenHUD:
+one local statusline and ledger for AI CLI token/cost usage across tools.

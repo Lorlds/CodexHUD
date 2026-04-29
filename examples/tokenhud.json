@@ -1,4 +1,6 @@
 {
+  "product": "TokenHUD",
+  "adapter": "codex",
   "session_file": "/home/user/.codex/sessions/2026/04/29/rollout-example.jsonl",
   "timestamp": "2026-04-29T01:00:00Z",
   "session": {
@@ -45,7 +47,7 @@
     "status": "configured",
     "last_updated": "2026-04-29",
     "stale": false,
-    "file": "/home/user/.codexhud/prices.json",
+    "file": "/home/user/.tokenhud/prices.json",
     "usd_per_1m_tokens": {
       "input": "5",
       "cached_input": "0.5",

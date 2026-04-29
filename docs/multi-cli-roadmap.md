@@ -1,6 +1,6 @@
 # Multi-CLI Roadmap
 
-CodexHUD starts as a Codex statusline, but the larger product is a local-first
+TokenHUD starts as a Codex statusline, but the larger product is a local-first
 AI CLI spend ledger: one prompt/statusline that answers "how much am I burning
 right now?" across Codex, Claude Code, Aider, Cursor, and local inference.
 
@@ -8,7 +8,7 @@ right now?" across Codex, Claude Code, Aider, Cursor, and local inference.
 
 The important shift is from prompt decoration to cost observability.
 
-CodexHUD today:
+TokenHUD today:
 
 - Reads one CLI's local session telemetry.
 - Renders one active session.
@@ -23,11 +23,11 @@ The broader product:
 
 ## Naming
 
-Rename before the adapter split lands. The public command can keep `codexhud` as
-a compatibility alias for the Codex adapter, but the main product should be
-vendor-neutral.
+The product name is now TokenHUD. The public command keeps `codexhud` as a
+compatibility alias for the Codex adapter, while the main product name and
+command are vendor-neutral.
 
-Recommended working name: `tokenline`.
+Selected name: `tokenhud`.
 
 Why:
 
@@ -46,11 +46,11 @@ Other viable names:
 Suggested transition:
 
 ```text
-tokenline              main command
-tokenline codex        explicit Codex adapter mode
-codexhud               compatibility alias for tokenline codex/status
+tokenhud              main command
+tokenhud codex        explicit Codex adapter mode
+codexhud               compatibility alias for tokenhud codex/status
 CODEXHUD_*             accepted for one release train
-TOKENLINE_*            new canonical environment variables
+TOKENHUD_*            new canonical environment variables
 ```
 
 ## Adapter Boundary
@@ -134,9 +134,9 @@ Build these before spending time on more visual styles.
 Environment variables:
 
 ```bash
-TOKENLINE_ALERT_USD=5
-TOKENLINE_ALERT_DAILY_USD=20
-TOKENLINE_ALERT_MODE=bell,notify
+TOKENHUD_ALERT_USD=5
+TOKENHUD_ALERT_DAILY_USD=20
+TOKENHUD_ALERT_MODE=bell,notify
 ```
 
 Behavior:
@@ -158,8 +158,8 @@ AI spend yesterday: $4.20 across 3 sessions; biggest spike 14:30 UTC ($1.10, cod
 
 Implementation:
 
-- Store state in `~/.tokenline/state.json`.
-- Store ledger records in `~/.tokenline/ledger.jsonl`.
+- Store state in `~/.tokenhud/state.json`.
+- Store ledger records in `~/.tokenhud/ledger.jsonl`.
 - Keep prompt path fast: prompt reads cached summary; background refresh updates
   the ledger.
 
@@ -168,10 +168,10 @@ Implementation:
 Command shape:
 
 ```bash
-tokenline spend --since 2026-04-01 --until 2026-04-30
-tokenline spend --since today --by adapter
-tokenline spend --since 2026-04-01 --csv
-tokenline spend --json
+tokenhud spend --since 2026-04-01 --until 2026-04-30
+tokenhud spend --since today --by adapter
+tokenhud spend --since 2026-04-01 --csv
+tokenhud spend --json
 ```
 
 CSV columns:
@@ -188,9 +188,9 @@ as community-maintained configuration, not live quotes.
 Recommended path:
 
 1. Keep local `prices.json` as the source of truth for cost calculations.
-2. Add `tokenline prices-check --remote` to compare local metadata with a
+2. Add `tokenhud prices-check --remote` to compare local metadata with a
    community registry.
-3. Create a separate `tokenline-prices` repo for PR-driven updates.
+3. Create a separate `tokenhud-prices` repo for PR-driven updates.
 4. Later, add a weekly GitHub Actions job that opens a PR when official pricing
    pages appear to change.
 
@@ -211,13 +211,13 @@ Priority:
 1. Raw GitHub installer:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/Lorlds/CodexHUD/main/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/Lorlds/TokenHUD/main/install.sh | bash
    ```
 
 2. Homebrew tap:
 
    ```bash
-   brew install lorlds/tap/tokenline
+   brew install lorlds/tap/tokenhud
    ```
 
 3. Terminal demo GIF or asciinema/VHS recording in the README.
@@ -227,29 +227,28 @@ Install safety:
 
 - Print what will be installed before writing.
 - Never overwrite user price/config files without confirmation.
-- Support `TOKENLINE_INSTALL_MODE=copy|link`.
+- Support `TOKENHUD_INSTALL_MODE=copy|link`.
 - Keep `CODEXHUD_INSTALL_MODE` as a compatibility alias during transition.
 
 ## Milestones
 
-### 0.3: Codex Ledger
+### 0.3: Rename Foundation
+
+- Make `tokenhud` the primary command.
+- Keep `codexhud` as a compatibility alias.
+- Use config root `~/.tokenhud`.
+- Accept both `TOKENHUD_*` and `CODEXHUD_*` env vars.
+
+### 0.4: Codex Ledger
 
 - Add `spend --since --csv --json` for Codex only.
 - Add single-session and daily threshold alerts.
 - Add daily summary cache.
-- Keep command name `codexhud`.
-
-### 0.4: Rename Foundation
-
-- Introduce `tokenline` command.
-- Keep `codexhud` as a compatibility alias.
-- Rename config root to `~/.tokenline`.
-- Accept both `TOKENLINE_*` and `CODEXHUD_*` env vars.
 - Move Codex-specific code behind `adapters/codex`.
 
 ### 0.5: Multi-CLI Preview
 
-- Add `tokenline adapters` and `tokenline doctor`.
+- Add `tokenhud adapters` and `tokenhud doctor`.
 - Add Claude Code adapter after local format verification.
 - Add Aider adapter with confidence tags.
 - Add provider-neutral price schema.
@@ -277,10 +276,9 @@ Install safety:
 
 ## Immediate Next Commit
 
-If the name is accepted, the next implementation should be:
+After the rename foundation, the next implementation should be:
 
-1. Add a `tokenline` wrapper command that calls the current core.
-2. Add `adapters/codex.sh` and move Codex-specific session parsing there.
-3. Add `spend --since --csv --json` on top of the existing Codex parser.
-4. Add `CODEXHUD_ALERT_USD` before the rename so current users get value
+1. Add `adapters/codex.sh` and move Codex-specific session parsing there.
+2. Add `spend --since --csv --json` on top of the existing Codex parser.
+3. Add `TOKENHUD_ALERT_USD` with `CODEXHUD_ALERT_USD` compatibility so current users get value
    immediately.

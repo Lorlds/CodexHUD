@@ -1,0 +1,1029 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_NUMERIC=C
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_dir="$(cd "$script_dir/.." 2>/dev/null && pwd || printf '%s' "$script_dir")"
+version="0.3.0"
+[ -f "$script_dir/.tokenhud-version" ] && version="$(tr -d '[:space:]' <"$script_dir/.tokenhud-version")"
+[ -f "$script_dir/.codexhud-version" ] && version="$(tr -d '[:space:]' <"$script_dir/.codexhud-version")"
+[ -f "$repo_dir/VERSION" ] && version="$(tr -d '[:space:]' <"$repo_dir/VERSION")"
+
+env_or_compat() {
+  local primary="$1" compat="$2" default="${3:-}"
+  if [ "${!primary+x}" ]; then
+    printf '%s' "${!primary}"
+  elif [ "${!compat+x}" ]; then
+    printf '%s' "${!compat}"
+  else
+    printf '%s' "$default"
+  fi
+}
+
+tail_lines="$(env_or_compat TOKENHUD_TAIL_LINES CODEXHUD_TAIL_LINES 500)"
+tokenhud_home="$(env_or_compat TOKENHUD_HOME CODEXHUD_HOME "$HOME/.tokenhud")"
+legacy_codexhud_home="${CODEXHUD_HOME:-$HOME/.codexhud}"
+price_file="$(env_or_compat TOKENHUD_PRICE_FILE CODEXHUD_PRICE_FILE "$tokenhud_home/prices.json")"
+cache_dir="$(env_or_compat TOKENHUD_CACHE_DIR CODEXHUD_CACHE_DIR "$tokenhud_home/cache")"
+case "$tail_lines" in ''|*[!0-9]*) tail_lines=500 ;; esac
+
+usage() {
+  cat <<'EOF'
+usage: tokenhud [tmux|compact|full|json|models|styles|adapters] [cwd] [SESSION_JSONL]
+       tokenhud init [bash|zsh]
+       tokenhud cache-refresh [cwd]
+       tokenhud prices-check
+       tokenhud --version
+
+Shows a compact statusline summary from local AI CLI telemetry.
+The Codex adapter is implemented now; Claude Code, Aider, Cursor, and local
+llamacpp adapters are planned behind the same interface.
+
+For Codex sessions, TokenHUD reads the local session JSONL and renders:
+model, cwd, git status, context usage, token counts, rate limits, session, and version.
+Cost is estimated from ~/.tokenhud/prices.json. Treat it as configuration, not
+an official live quote.
+
+Environment:
+  TOKENHUD_STYLE   balanced|minimal|ledger|risk|executive|focus|ascii
+  TOKENHUD_MODEL   override detected model for the active adapter
+  TOKENHUD_ASCII   set to 1 for an ASCII progress bar
+  TOKENHUD_PROMPT  set to 0 to disable prompt integration
+  TOKENHUD_DEBUG   set to 1 to log prompt refresh errors to cache/refresh.log
+  TOKENHUD_HOME   config/cache root, default ~/.tokenhud
+  TOKENHUD_CACHE_DIR   prompt cache dir, default $TOKENHUD_HOME/cache
+  TOKENHUD_PRICE_FILE   price config path, default ~/.tokenhud/prices.json
+  TOKENHUD_PRICES_CHECK_FETCH set to 1 for prices-check URL reachability probes
+  TOKENHUD_TAIL_LINES   recent JSONL lines to scan before full fallback, default 500
+                       set 0 to skip the recent scan and scan the full JSONL
+  TOKENHUD_CACHE_TTL   prompt cache refresh interval in seconds, default 2
+  TOKENHUD_SESSION_SCAN_LIMIT   max sessions to scan for cwd matching, default 0 for all
+
+Compatibility:
+  codexhud remains an alias for tokenhud's Codex adapter.
+  CODEXHUD_* environment variables are still accepted when TOKENHUD_* is unset.
+EOF
+}
+
+mode="${1:-tmux}"
+case "$mode" in
+  tmux|compact|full|json|models|styles|adapters|init|cache-refresh|cache-key|prices-check) shift || true ;;
+  -h|--help) usage; exit 0 ;;
+  -V|--version|version) printf 'tokenhud %s\n' "$version"; exit 0 ;;
+  *)
+    printf 'tokenhud: unsupported mode: %s\n' "$mode" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+cwd_arg="${1:-}"
+session_arg="${2:-}"
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+session_scan_limit="$(env_or_compat TOKENHUD_SESSION_SCAN_LIMIT CODEXHUD_SESSION_SCAN_LIMIT 0)"
+case "$session_scan_limit" in ''|*[!0-9]*) session_scan_limit=0 ;; esac
+
+require_commands() {
+  local missing=0 cmd
+  for cmd in "$@"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      printf 'tokenhud: missing required command: %s\n' "$cmd" >&2
+      missing=1
+    fi
+  done
+  [ "$missing" -eq 0 ] || exit 127
+}
+
+hash_key_for_path() {
+  local path="$1" digest key
+  if command -v sha1sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$path" | sha1sum)"
+    key="${digest%% *}"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$path" | shasum -a 1)"
+    key="${digest%% *}"
+  elif command -v md5sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$path" | md5sum)"
+    key="${digest%% *}"
+  elif command -v md5 >/dev/null 2>&1; then
+    digest="$(printf '%s' "$path" | md5)"
+    key="${digest##* }"
+  elif command -v openssl >/dev/null 2>&1; then
+    digest="$(printf '%s' "$path" | openssl dgst -sha1)"
+    key="${digest##* }"
+  else
+    printf 'tokenhud: need sha1sum, shasum, md5sum, md5, or openssl for cache keys\n' >&2
+    return 1
+  fi
+  printf '%.16s' "$key"
+}
+
+print_init() {
+  local shell_name="${1:-bash}"
+  case "$shell_name" in
+    bash)
+      cat <<'EOF'
+# TokenHUD prompt integration. Disable with TOKENHUD_PROMPT=0.
+_tokenhud_cache_file() {
+  local key
+  key="$(tokenhud cache-key "$PWD")" || return 1
+  printf '%s/prompt-%s.txt' "${TOKENHUD_CACHE_DIR:-${CODEXHUD_CACHE_DIR:-${TOKENHUD_HOME:-${CODEXHUD_HOME:-$HOME/.tokenhud}}/cache}}" "$key"
+}
+
+_tokenhud_debug_log() {
+  [ "${TOKENHUD_DEBUG:-${CODEXHUD_DEBUG:-0}}" = "1" ] || return 1
+  local cache_dir="${1:-${TOKENHUD_CACHE_DIR:-${CODEXHUD_CACHE_DIR:-${TOKENHUD_HOME:-${CODEXHUD_HOME:-$HOME/.tokenhud}}/cache}}}" log bytes
+  log="$cache_dir/refresh.log"
+  mkdir -p "$cache_dir" 2>/dev/null || true
+  if [ -f "$log" ]; then
+    bytes="$(wc -c <"$log" 2>/dev/null || printf 0)"
+    case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+    if [ "$bytes" -gt 200000 ]; then
+      mv "$log" "$log.1" 2>/dev/null || true
+    fi
+  fi
+  printf '%s\n' "$log"
+}
+
+_tokenhud_refresh() {
+  local cache_file="$1" refresh_cwd="$2" cache_dir="$3" log
+  if log="$(_tokenhud_debug_log "$cache_dir")"; then
+    {
+      printf '[%s] refresh %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$refresh_cwd"
+      TOKENHUD_CACHE_FILE="$cache_file" tokenhud cache-refresh "$refresh_cwd"
+    } >>"$log" 2>&1
+  else
+    TOKENHUD_CACHE_FILE="$cache_file" tokenhud cache-refresh "$refresh_cwd" >/dev/null 2>&1
+  fi
+}
+
+_tokenhud_precmd() {
+  local last_status=$? cache_file cache_dir line="" now mtime ttl
+  if [ "${TOKENHUD_PROMPT:-${CODEXHUD_PROMPT:-1}}" != "0" ] && command -v tokenhud >/dev/null 2>&1; then
+    cache_file="$(_tokenhud_cache_file)" || return "$last_status"
+    cache_dir="${cache_file%/*}"
+    mkdir -p "$cache_dir" 2>/dev/null || true
+    if [ ! -r "$cache_file" ]; then
+      _tokenhud_refresh "$cache_file" "$PWD" "$cache_dir" || true
+    fi
+    if [ -r "$cache_file" ]; then
+      IFS= read -r line <"$cache_file" || true
+    fi
+    [ -n "$line" ] && printf '%s\n' "$line"
+    ttl="${TOKENHUD_CACHE_TTL:-${CODEXHUD_CACHE_TTL:-2}}"
+    case "$ttl" in ''|*[!0-9]*) ttl=2 ;; esac
+    now="$(date +%s)"
+    mtime="$(stat -c '%Y' "$cache_file" 2>/dev/null || stat -f '%m' "$cache_file" 2>/dev/null || printf 0)"
+    if [ "$((now - mtime))" -ge "$ttl" ]; then
+      _tokenhud_refresh "$cache_file" "$PWD" "$cache_dir" &
+      disown "$!" 2>/dev/null || true
+    fi
+  fi
+  return "$last_status"
+}
+
+case ";${PROMPT_COMMAND:-};" in
+  *";_tokenhud_precmd;"*) ;;
+  *) PROMPT_COMMAND="_tokenhud_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+esac
+EOF
+      ;;
+    zsh)
+      cat <<'EOF'
+# TokenHUD prompt integration. Disable with TOKENHUD_PROMPT=0.
+_tokenhud_cache_file() {
+  local key
+  key="$(tokenhud cache-key "$PWD")" || return 1
+  printf '%s/prompt-%s.txt' "${TOKENHUD_CACHE_DIR:-${CODEXHUD_CACHE_DIR:-${TOKENHUD_HOME:-${CODEXHUD_HOME:-$HOME/.tokenhud}}/cache}}" "$key"
+}
+
+_tokenhud_debug_log() {
+  [ "${TOKENHUD_DEBUG:-${CODEXHUD_DEBUG:-0}}" = "1" ] || return 1
+  local cache_dir="${1:-${TOKENHUD_CACHE_DIR:-${CODEXHUD_CACHE_DIR:-${TOKENHUD_HOME:-${CODEXHUD_HOME:-$HOME/.tokenhud}}/cache}}}" log bytes
+  log="$cache_dir/refresh.log"
+  mkdir -p "$cache_dir" 2>/dev/null || true
+  if [ -f "$log" ]; then
+    bytes="$(wc -c <"$log" 2>/dev/null || printf 0)"
+    case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+    if [ "$bytes" -gt 200000 ]; then
+      mv "$log" "$log.1" 2>/dev/null || true
+    fi
+  fi
+  printf '%s\n' "$log"
+}
+
+_tokenhud_refresh() {
+  local cache_file="$1" refresh_cwd="$2" cache_dir="$3" log
+  if log="$(_tokenhud_debug_log "$cache_dir")"; then
+    {
+      printf '[%s] refresh %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$refresh_cwd"
+      TOKENHUD_CACHE_FILE="$cache_file" tokenhud cache-refresh "$refresh_cwd"
+    } >>"$log" 2>&1
+  else
+    TOKENHUD_CACHE_FILE="$cache_file" tokenhud cache-refresh "$refresh_cwd" >/dev/null 2>&1
+  fi
+}
+
+_tokenhud_precmd() {
+  local last_status=$? cache_file cache_dir line="" now mtime ttl
+  if [[ "${TOKENHUD_PROMPT:-${CODEXHUD_PROMPT:-1}}" != "0" ]] && command -v tokenhud >/dev/null 2>&1; then
+    cache_file="$(_tokenhud_cache_file)" || return "$last_status"
+    cache_dir="${cache_file:h}"
+    mkdir -p "$cache_dir" 2>/dev/null || true
+    if [[ ! -r "$cache_file" ]]; then
+      _tokenhud_refresh "$cache_file" "$PWD" "$cache_dir" || true
+    fi
+    if [[ -r "$cache_file" ]]; then
+      IFS= read -r line <"$cache_file" || true
+    fi
+    [[ -n "$line" ]] && print -r -- "$line"
+    ttl="${TOKENHUD_CACHE_TTL:-${CODEXHUD_CACHE_TTL:-2}}"
+    case "$ttl" in ''|*[!0-9]*) ttl=2 ;; esac
+    now="$(date +%s)"
+    mtime="$(stat -c '%Y' "$cache_file" 2>/dev/null || stat -f '%m' "$cache_file" 2>/dev/null || printf 0)"
+    if (( now - mtime >= ttl )); then
+      _tokenhud_refresh "$cache_file" "$PWD" "$cache_dir" &!
+    fi
+  fi
+  return "$last_status"
+}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook -d precmd _tokenhud_precmd 2>/dev/null || true
+add-zsh-hook precmd _tokenhud_precmd
+EOF
+      ;;
+    *)
+      printf 'tokenhud: unsupported shell for init: %s\n' "$shell_name" >&2
+      printf 'supported shells: bash, zsh\n' >&2
+      exit 2
+      ;;
+  esac
+}
+
+if [ "$mode" = "init" ]; then
+  print_init "${cwd_arg:-bash}"
+  exit $?
+fi
+
+if [ "$mode" = "cache-key" ]; then
+  hash_key_for_path "${cwd_arg:-$PWD}"
+  printf '\n'
+  exit 0
+fi
+
+cache_file_for_cwd() {
+  local dir="$1" key
+  key="$(hash_key_for_path "$dir")" || return 1
+  printf '%s/prompt-%s.txt' "$cache_dir" "$key"
+}
+
+resolved_price_file() {
+  if [ -f "$price_file" ]; then
+    printf '%s\n' "$price_file"
+  elif [ -f "$legacy_codexhud_home/prices.json" ]; then
+    printf '%s\n' "$legacy_codexhud_home/prices.json"
+  elif [ -f "$repo_dir/config/prices.json" ]; then
+    printf '%s\n' "$repo_dir/config/prices.json"
+  else
+    printf '%s\n' "$price_file"
+  fi
+}
+
+price_config_file="$(resolved_price_file)"
+
+session_candidates() {
+  local dir="$codex_home/sessions"
+  [ -d "$dir" ] || return 0
+
+  if find . --version >/dev/null 2>&1; then
+    find "$dir" -type f -name 'rollout-*.jsonl' -printf '%T@ %p\n' 2>/dev/null \
+      | sort -nr \
+      | awk 'limit <= 0 || NR <= limit { $1 = ""; sub(/^ /, ""); print }' limit="$session_scan_limit"
+  else
+    find "$dir" -type f -name 'rollout-*.jsonl' -exec stat -f '%m %N' {} \; 2>/dev/null \
+      | sort -nr \
+      | awk 'limit <= 0 || NR <= limit { $1 = ""; sub(/^ /, ""); print }' limit="$session_scan_limit"
+  fi
+}
+
+session_meta_payload() {
+  local file="$1"
+  jq -Rrc 'limit(1; fromjson? | select(.type == "session_meta") | .payload)' "$file" 2>/dev/null || true
+}
+
+session_cwd_for() {
+  local file="$1"
+  session_meta_payload "$file" | jq -r '.cwd // empty' 2>/dev/null || true
+}
+
+latest_session() {
+  local desired_cwd="${1:-}" candidate candidate_cwd
+  local candidates=()
+  mapfile -t candidates < <(session_candidates)
+
+  if [ -n "$desired_cwd" ] && [ "$desired_cwd" != "null" ]; then
+    for candidate in "${candidates[@]}"; do
+      [ -f "$candidate" ] || continue
+      candidate_cwd="$(session_cwd_for "$candidate")"
+      if [ "$candidate_cwd" = "$desired_cwd" ]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  fi
+
+  if [ "${#candidates[@]}" -gt 0 ]; then
+    printf '%s\n' "${candidates[0]}"
+  fi
+}
+
+file_mtime() {
+  local file="$1"
+  stat -c '%Y' "$file" 2>/dev/null || stat -f '%m' "$file" 2>/dev/null || printf 0
+}
+
+cache_gc() {
+  find "$cache_dir" -type f -name 'prompt-*.txt' -mtime +30 -delete 2>/dev/null || true
+}
+
+if [ "$mode" = "cache-refresh" ]; then
+  require_commands jq awk git find sort tail date
+  cache_cwd="${cwd_arg:-$PWD}"
+  cache_file_for_refresh="$(env_or_compat TOKENHUD_CACHE_FILE CODEXHUD_CACHE_FILE "$(cache_file_for_cwd "$cache_cwd")")"
+  mkdir -p "${cache_file_for_refresh%/*}"
+  cache_gc
+
+  refresh_session="$(latest_session "$cache_cwd")"
+  if [ -n "$refresh_session" ] && [ -f "$refresh_session" ] && [ -s "$cache_file_for_refresh" ]; then
+    session_mtime="$(file_mtime "$refresh_session")"
+    price_mtime="$(file_mtime "$price_config_file")"
+    cache_mtime="$(file_mtime "$cache_file_for_refresh")"
+    if [ "$session_mtime" -le "$cache_mtime" ] && [ "$price_mtime" -le "$cache_mtime" ]; then
+      touch "$cache_file_for_refresh"
+      exit 0
+    fi
+  fi
+
+  tmp_cache="${cache_file_for_refresh}.$$"
+  if [ -n "${refresh_session:-}" ] && [ -f "$refresh_session" ]; then
+    refresh_cmd=( "$0" tmux "$cache_cwd" "$refresh_session" )
+  else
+    refresh_cmd=( "$0" tmux "$cache_cwd" )
+  fi
+
+  if "${refresh_cmd[@]}" >"$tmp_cache" 2>/dev/null; then
+    mv "$tmp_cache" "$cache_file_for_refresh"
+  else
+    rm -f "$tmp_cache"
+    exit 1
+  fi
+  exit 0
+fi
+
+short_num() {
+  awk -v n="${1:-0}" 'BEGIN {
+    if (n == "" || n == "null" || n == "n/a" || n !~ /^-?[0-9]+([.][0-9]+)?$/) { print "n/a"; exit }
+    if (n >= 1000000) printf "%.2fM", n / 1000000;
+    else if (n >= 1000) printf "%.1fk", n / 1000;
+    else printf "%.0f", n;
+  }'
+}
+
+percent() {
+  awk -v n="${1:-0}" 'BEGIN {
+    if (n == "" || n == "null" || n == "n/a" || n !~ /^-?[0-9]+([.][0-9]+)?$/) { print "n/a"; exit }
+    printf "%.1f%%", n;
+  }'
+}
+
+repeat_char() {
+  local char="$1" count="${2:-0}" i
+  for ((i = 0; i < count; i++)); do
+    printf '%s' "$char"
+  done
+}
+
+rel_time() {
+  local ts="${1:-}"
+  case "$ts" in
+    ''|null|n/a|*[!0-9]*)
+      printf 'n/a'
+      return
+      ;;
+  esac
+  local now diff days hours mins
+  now="$(date +%s)"
+  diff=$((ts - now))
+  if [ "$diff" -le 0 ]; then
+    printf 'now'
+    return
+  fi
+  days=$((diff / 86400))
+  hours=$(((diff % 86400) / 3600))
+  mins=$(((diff % 3600) / 60))
+  if [ "$days" -gt 0 ]; then
+    printf '%dd%dh' "$days" "$hours"
+  elif [ "$hours" -gt 0 ]; then
+    printf '%dh%dm' "$hours" "$mins"
+  else
+    printf '%dm' "$mins"
+  fi
+}
+
+elapsed_since_iso() {
+  local iso="${1:-}"
+  if [ -z "$iso" ] || [ "$iso" = "null" ]; then
+    printf 'n/a'
+    return
+  fi
+  local start now diff hours mins
+  start="$(jq -nr --arg ts "$iso" 'try ($ts | sub("\\.[0-9]+"; "") | fromdateiso8601 | floor) catch empty' 2>/dev/null || true)"
+  if [ -z "$start" ]; then
+    printf 'n/a'
+    return
+  fi
+  now="$(date +%s)"
+  diff=$((now - start))
+  [ "$diff" -lt 0 ] && diff=0
+  hours=$((diff / 3600))
+  mins=$(((diff % 3600) / 60))
+  if [ "$hours" -gt 0 ]; then
+    printf '%dh%dm' "$hours" "$mins"
+  else
+    printf '%dm' "$mins"
+  fi
+}
+
+progress_bar() {
+  local pct="${1:-0}" width="${2:-10}" ascii="${3:-}" filled empty
+  local pct_int
+  [ -n "$ascii" ] || ascii="$(env_or_compat TOKENHUD_ASCII CODEXHUD_ASCII 0)"
+  pct_int="$(awk -v p="$pct" 'BEGIN { if (p !~ /^-?[0-9]+([.][0-9]+)?$/) p = 0; if (p < 0) p = 0; if (p > 100) p = 100; printf "%d", p }')"
+  filled=$((pct_int * width / 100))
+  empty=$((width - filled))
+  if [ "$ascii" = "1" ]; then
+    printf '['
+    printf '%*s' "$filled" '' | tr ' ' '#'
+    printf '%*s' "$empty" '' | tr ' ' '-'
+    printf ']'
+  else
+    printf '▕'
+    repeat_char '█' "$filled"
+    repeat_char '░' "$empty"
+    printf '▏'
+  fi
+}
+
+price_table() {
+  local model_slug="$1" file="$price_config_file"
+  if [ ! -f "$file" ]; then
+    printf 'n/a\tn/a\tn/a\tn/a\tn/a\tn/a\tmissing-price-file\tn/a\tfalse'
+    return
+  fi
+
+  jq -er --arg model "$model_slug" '
+    . as $root
+    | ($root.last_updated // "n/a") as $updated
+    | ($root.stale_after_days // 30) as $stale_after
+    | ($root.models[$model] // null) as $m
+    | if $m == null then
+        ["n/a","n/a","n/a","n/a","n/a","n/a","unknown-model",$updated,false]
+      else
+        (try ((now - ($updated | strptime("%Y-%m-%d") | mktime)) / 86400) catch 999999) as $age_days
+        | ($m.status // "configured") as $base_status
+        | ($age_days > $stale_after) as $stale
+        | [
+            ($m.usd_per_1m.input // "n/a"),
+            ($m.usd_per_1m.cached_input // "n/a"),
+            ($m.usd_per_1m.output // "n/a"),
+            ($m.codex_credits_per_1m.input // "n/a"),
+            ($m.codex_credits_per_1m.cached_input // "n/a"),
+            ($m.codex_credits_per_1m.output // "n/a"),
+            $base_status,
+            $updated,
+            ($stale | tostring)
+          ]
+      end
+    | @tsv
+  ' "$file" 2>/dev/null || printf 'n/a\tn/a\tn/a\tn/a\tn/a\tn/a\tinvalid-price-file\tn/a\tfalse'
+}
+
+prices_check() {
+  local file="$price_config_file" url status
+  if [ ! -f "$file" ]; then
+    printf 'tokenhud: price config not found: %s\n' "$file" >&2
+    return 1
+  fi
+  if ! jq -e . "$file" >/dev/null 2>&1; then
+    printf 'tokenhud: invalid price config: %s\n' "$file" >&2
+    return 1
+  fi
+
+  jq -r --arg file "$file" '
+    . as $root
+    | ($root.last_updated // "n/a") as $updated
+    | ($root.stale_after_days // 30) as $stale_after
+    | (try (((now - ($updated | strptime("%Y-%m-%d") | mktime)) / 86400) | floor) catch "n/a") as $age_days
+    | (if (($age_days | type) == "number") then ($age_days > $stale_after) else true end) as $stale
+    | ([
+        "prices file: \($file)",
+        "schema: \($root.schema // "n/a")",
+        "currency: \($root.currency // "n/a")",
+        "unit: \($root.unit // "n/a")",
+        "last_updated: \($updated)",
+        "age_days: \($age_days)",
+        "stale_after_days: \($stale_after)",
+        "stale: \($stale)",
+        "models: \(($root.models // {}) | length)",
+        "source_urls:"
+      ] | .[]),
+      (($root.source_urls // [])[]? | "  - \(.)"),
+      "manual refresh:",
+      "  1. Open the source_urls and compare model prices.",
+      "  2. Edit \($file) and update last_updated.",
+      "  3. Run tokenhud models to inspect configured and unknown models."
+  ' "$file"
+
+  if [ "$(env_or_compat TOKENHUD_PRICES_CHECK_FETCH CODEXHUD_PRICES_CHECK_FETCH 0)" = "1" ]; then
+    if ! command -v curl >/dev/null 2>&1; then
+      printf 'tokenhud: curl not found; skipping URL reachability probes\n' >&2
+      return 0
+    fi
+    printf 'source reachability:\n'
+    jq -r '.source_urls[]?' "$file" | while IFS= read -r url; do
+      status="$(curl -fsSI --max-time 10 "$url" 2>/dev/null | awk 'NR == 1 { print; exit }' || true)"
+      [ -n "$status" ] || status="unreachable"
+      printf '  - %s: %s\n' "$url" "$status"
+    done
+  fi
+}
+
+if [ "$mode" = "styles" ]; then
+  cat <<'EOF'
+balanced   TH codex:gpt-5.5 ▕████████░░▏ 80.7%  $ 0.127/7.50  cr 3.17cr/187cr  lim 9.0/13.0%  main +11
+minimal    TH 80.7% $7.50 187cr main +11
+ledger     TH codex last $0.127/3.17cr | session $7.50/187cr | in 6.27M out 45.2k
+risk       TH ▕████████░░▏ 80.7% watch  $7.50  lim 9.0/13.0%  main +11
+executive  TokenHUD | adapter codex | ctx 80.7% | session $7.50 / 187cr | limits 9.0%/13.0%
+focus      TH 80.7% watch $7.50
+ascii      TH codex:gpt-5.5 [########--] 80.7% $0.127/$7.50 main +11
+EOF
+  exit 0
+fi
+
+case "$mode" in
+  styles) ;;
+  models) require_commands jq awk codex ;;
+  prices-check) require_commands jq ;;
+  adapters) ;;
+  *) require_commands jq awk git find sort tail date ;;
+esac
+
+if [ "$mode" = "adapters" ]; then
+  cat <<'EOF'
+adapter   status       source
+codex     implemented  ~/.codex/sessions/**/*.jsonl
+claude    planned      ~/.claude/ after format verification
+aider     planned      local Aider history/analytics after format verification
+cursor    research     local Cursor storage after version-specific verification
+llamacpp  planned      local logs/metrics with user-configured cost
+EOF
+  exit 0
+fi
+
+if [ "$mode" = "prices-check" ]; then
+  prices_check
+  exit 0
+fi
+
+if [ "$mode" = "models" ]; then
+  printf '%-24s %-10s %-8s %-11s %-11s %-11s %-24s %-12s %-6s\n' "model" "api" "visible" "input" "cached" "output" "status" "updated" "stale"
+  codex debug models | jq -r '.models[] | [.slug, (.supported_in_api|tostring), (.visibility // "")] | @tsv' \
+    | while IFS=$'\t' read -r slug supported visibility; do
+        IFS=$'\t' read -r usd_input_rate usd_cached_rate usd_output_rate _credit_input _credit_cached _credit_output pricing_status pricing_updated pricing_stale <<EOF
+$(price_table "$slug")
+EOF
+        printf '%-24s %-10s %-8s %-11s %-11s %-11s %-24s %-12s %-6s\n' \
+          "$slug" "$supported" "$visibility" "$usd_input_rate" "$usd_cached_rate" "$usd_output_rate" "$pricing_status" "$pricing_updated" "$pricing_stale"
+      done
+  exit 0
+fi
+
+calc_metered_cost() {
+  local input="$1" cached="$2" output="$3" input_rate="$4" cached_rate="$5" output_rate="$6"
+  if [ "$input_rate" = "n/a" ] || [ "$cached_rate" = "n/a" ] || [ "$output_rate" = "n/a" ]; then
+    printf 'n/a'
+    return
+  fi
+  awk -v input="$input" -v cached="$cached" -v output="$output" \
+    -v input_rate="$input_rate" -v cached_rate="$cached_rate" -v output_rate="$output_rate" 'BEGIN {
+      if (cached > input) cached = input;
+      uncached = input - cached;
+      printf "%.6f", ((uncached * input_rate) + (cached * cached_rate) + (output * output_rate)) / 1000000;
+    }'
+}
+
+money() {
+  local value="${1:-n/a}"
+  local bare="${2:-0}"
+  if [ "$value" = "n/a" ] || ! awk -v n="$value" 'BEGIN { exit !(n ~ /^-?[0-9]+([.][0-9]+)?$/) }'; then
+    printf 'n/a'
+    return
+  fi
+  awk -v n="$value" 'BEGIN {
+    if (n < 0.01) printf "%.4f", n;
+    else if (n < 1) printf "%.3f", n;
+    else printf "%.2f", n;
+  }' | {
+    IFS= read -r formatted
+    if [ "$bare" = "1" ]; then
+      printf '%s' "$formatted"
+    else
+      printf '$%s' "$formatted"
+    fi
+  }
+}
+
+credit_fmt() {
+  local value="${1:-n/a}"
+  if [ "$value" = "n/a" ] || ! awk -v n="$value" 'BEGIN { exit !(n ~ /^-?[0-9]+([.][0-9]+)?$/) }'; then
+    printf 'n/a'
+    return
+  fi
+  awk -v n="$value" 'BEGIN {
+    if (n < 10) printf "%.2fcr", n;
+    else if (n < 100) printf "%.1fcr", n;
+    else printf "%.0fcr", n;
+  }'
+}
+
+git_summary() {
+  local dir="$1"
+  if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'no-git'
+    return
+  fi
+  local branch changed
+  branch="$(git -C "$dir" branch --show-current 2>/dev/null || true)"
+  [ -z "$branch" ] && branch="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || true)"
+  changed="$(git -C "$dir" status --short 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "${changed:-0}" -gt 0 ]; then
+    printf '%s +%s' "$branch" "$changed"
+  else
+    printf '%s clean' "$branch"
+  fi
+}
+
+config_model() {
+  local file="$1" requested_profile="${2:-}"
+  [ -f "$file" ] || return 0
+  awk -v requested_profile="$requested_profile" '
+    function trim(s) {
+      sub(/^[ \t\r\n]+/, "", s)
+      sub(/[ \t\r\n]+$/, "", s)
+      return s
+    }
+    function uncomment(s, out, i, c, inq, esc) {
+      out = ""; inq = 0; esc = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\"" && esc == 0) inq = !inq
+        if (c == "#" && inq == 0) break
+        out = out c
+        if (c == "\\" && esc == 0) esc = 1
+        else esc = 0
+      }
+      return out
+    }
+    function value(line) {
+      sub(/^[^=]*=/, "", line)
+      line = trim(uncomment(line))
+      if (line ~ /^".*"$/) {
+        sub(/^"/, "", line)
+        sub(/"$/, "", line)
+      }
+      return line
+    }
+    BEGIN { section = ""; root_model = ""; active_profile = requested_profile }
+    /^[ \t]*(#|$)/ { next }
+    /^[ \t]*\[/ {
+      section = $0
+      sub(/^[ \t]*\[/, "", section)
+      sub(/\][ \t]*$/, "", section)
+      next
+    }
+    section == "" && /^[ \t]*profile[ \t]*=/ {
+      if (active_profile == "") active_profile = value($0)
+      next
+    }
+    section == "" && /^[ \t]*model[ \t]*=/ {
+      root_model = value($0)
+      next
+    }
+    (section == ("profile." active_profile) || section == ("profiles." active_profile)) && /^[ \t]*model[ \t]*=/ {
+      profile_model = value($0)
+      next
+    }
+    END {
+      if (profile_model != "") print profile_model
+      else if (root_model != "") print root_model
+    }
+  ' "$file"
+}
+
+session="${session_arg:-}"
+[ -z "$session" ] && session="$(latest_session "$cwd_arg")"
+
+if [ -z "$session" ] || [ ! -f "$session" ]; then
+  echo "tokenhud: no Codex session file found"
+  exit 1
+fi
+
+token_filter='
+  fromjson?
+  |
+  select(
+    .type == "event_msg"
+    and .payload.type == "token_count"
+    and (.payload.info.total_token_usage? != null)
+  )
+'
+
+event=""
+if [ "$tail_lines" -gt 0 ]; then
+  event="$(tail -n "$tail_lines" "$session" | jq -Rrc "$token_filter" 2>/dev/null | tail -n 1 || true)"
+fi
+[ -z "$event" ] && event="$(jq -Rrc "$token_filter" "$session" 2>/dev/null | tail -n 1 || true)"
+
+if [ -z "$event" ]; then
+  echo "tokenhud: no Codex token_count event found"
+  exit 1
+fi
+
+meta="$(session_meta_payload "$session")"
+
+IFS=$'\t' read -r session_id session_cwd cli_version provider session_model <<EOF
+$(printf '%s\n' "$meta" | jq -r '[
+  (.id // "n/a"),
+  (.cwd // "n/a"),
+  (.cli_version // "n/a"),
+  (.model_provider // "n/a"),
+  (.model // .model_slug // .model_id // .model_name // .config.model // "n/a")
+] | @tsv')
+EOF
+
+IFS=$'\t' read -r _event_ts last_input last_cached last_output last_reasoning last_total total_input total_cached total_output total_reasoning total_total context_window primary_used primary_reset primary_window secondary_used secondary_reset secondary_window plan_type <<EOF
+$(printf '%s\n' "$event" | jq -r '
+  .payload.info as $i
+  | .payload.rate_limits as $r
+  | [
+      (.timestamp // "n/a"),
+      ($i.last_token_usage.input_tokens // 0),
+      ($i.last_token_usage.cached_input_tokens // 0),
+      ($i.last_token_usage.output_tokens // 0),
+      ($i.last_token_usage.reasoning_output_tokens // 0),
+      ($i.last_token_usage.total_tokens // 0),
+      ($i.total_token_usage.input_tokens // 0),
+      ($i.total_token_usage.cached_input_tokens // 0),
+      ($i.total_token_usage.output_tokens // 0),
+      ($i.total_token_usage.reasoning_output_tokens // 0),
+      ($i.total_token_usage.total_tokens // 0),
+      ($i.model_context_window // 0),
+      ($r.primary.used_percent // "n/a"),
+      ($r.primary.resets_at // "n/a"),
+      ($r.primary.window_minutes // "n/a"),
+      ($r.secondary.used_percent // "n/a"),
+      ($r.secondary.resets_at // "n/a"),
+      ($r.secondary.window_minutes // "n/a"),
+      ($r.plan_type // "n/a")
+    ] | @tsv
+')
+EOF
+
+config_model_value="$(config_model "$codex_home/config.toml" "${CODEX_PROFILE:-}")"
+if [ -n "${session_model:-}" ] && [ "$session_model" != "n/a" ] && [ "$session_model" != "null" ]; then
+  model="$session_model"
+else
+  model="$config_model_value"
+fi
+[ -z "$model" ] && model="codex"
+model="$(env_or_compat TOKENHUD_MODEL CODEXHUD_MODEL "$model")"
+IFS=$'\t' read -r usd_input_rate usd_cached_rate usd_output_rate credit_input_rate credit_cached_rate credit_output_rate pricing_status pricing_updated pricing_stale <<EOF
+$(price_table "$model")
+EOF
+
+display_cwd="${cwd_arg:-$session_cwd}"
+if [ -z "$display_cwd" ] || [ "$display_cwd" = "null" ]; then
+  display_cwd="$PWD"
+fi
+short_cwd="${display_cwd/#$HOME/~}"
+git_info="$(git_summary "$display_cwd")"
+session_short="${session_id:0:8}"
+
+ctx_pct="$(awk -v used="${last_total:-0}" -v win="${context_window:-0}" 'BEGIN {
+  if (used !~ /^-?[0-9]+([.][0-9]+)?$/) used = 0;
+  if (win ~ /^-?[0-9]+([.][0-9]+)?$/ && win > 0) printf "%.1f", (used / win) * 100;
+  else printf "0";
+}')"
+bar="$(progress_bar "$ctx_pct" 10)"
+
+primary_reset_rel="$(rel_time "$primary_reset")"
+secondary_reset_rel="$(rel_time "$secondary_reset")"
+age="$(elapsed_since_iso "$(printf '%s\n' "$meta" | jq -r '.timestamp // empty' 2>/dev/null || true)")"
+last_usd="$(calc_metered_cost "$last_input" "$last_cached" "$last_output" "$usd_input_rate" "$usd_cached_rate" "$usd_output_rate")"
+total_usd="$(calc_metered_cost "$total_input" "$total_cached" "$total_output" "$usd_input_rate" "$usd_cached_rate" "$usd_output_rate")"
+last_credits="$(calc_metered_cost "$last_input" "$last_cached" "$last_output" "$credit_input_rate" "$credit_cached_rate" "$credit_output_rate")"
+total_credits="$(calc_metered_cost "$total_input" "$total_cached" "$total_output" "$credit_input_rate" "$credit_cached_rate" "$credit_output_rate")"
+
+plain_money() {
+  money "$1" 1
+}
+
+risk_label() {
+  local pct="${1:-0}"
+  awk -v p="$pct" 'BEGIN {
+    if (p >= 95) print "compact-now";
+    else if (p >= 85) print "compact-soon";
+    else if (p >= 75) print "watch";
+    else print "steady";
+  }'
+}
+
+pricing_flag() {
+  local status="${pricing_status:-unknown}" stale="${pricing_stale:-false}"
+  if [ "$status" = "configured" ] && [ "$stale" != "true" ]; then
+    return
+  fi
+  if [ "$stale" = "true" ]; then
+    case "$status" in
+      configured) printf ' price:stale' ;;
+      provisional-*) printf ' price:stale/provisional' ;;
+      *) printf ' price:stale/%s' "$status" ;;
+    esac
+    return
+  fi
+  case "$status" in
+    provisional-*) printf ' price:provisional' ;;
+    unknown-model) printf ' price:unknown' ;;
+    *) printf ' price:%s' "$status" ;;
+  esac
+}
+
+case "$mode" in
+  json)
+    printf '%s\n' "$event" | jq \
+      --arg session_file "$session" \
+      --arg adapter "codex" \
+      --arg session_id "$session_id" \
+      --arg session_short "$session_short" \
+      --arg cli_version "$cli_version" \
+      --arg provider "$provider" \
+      --arg model "$model" \
+      --arg cwd "$display_cwd" \
+      --arg git "$git_info" \
+      --arg context_percentage "$ctx_pct" \
+      --arg pricing_status "$pricing_status" \
+      --arg pricing_updated "$pricing_updated" \
+      --arg pricing_stale "$pricing_stale" \
+      --arg pricing_file "$price_config_file" \
+      --arg usd_input_rate "$usd_input_rate" \
+      --arg usd_cached_rate "$usd_cached_rate" \
+      --arg usd_output_rate "$usd_output_rate" \
+      --arg credit_input_rate "$credit_input_rate" \
+      --arg credit_cached_rate "$credit_cached_rate" \
+      --arg credit_output_rate "$credit_output_rate" \
+      --arg last_usd "$last_usd" \
+      --arg total_usd "$total_usd" \
+      --arg last_credits "$last_credits" \
+      --arg total_credits "$total_credits" \
+      --arg age "$age" \
+      '{
+        product: "TokenHUD",
+        adapter: $adapter,
+        session_file: $session_file,
+        timestamp: .timestamp,
+        session: {
+          id: $session_id,
+          short_id: $session_short,
+          age: $age,
+          cli_version: $cli_version,
+          provider: $provider
+        },
+        model: $model,
+        cwd: $cwd,
+        git: $git,
+        context: {
+          used_percentage: ($context_percentage | tonumber),
+          window: .payload.info.model_context_window
+        },
+        tokens: {
+          last: .payload.info.last_token_usage,
+          total: .payload.info.total_token_usage
+        },
+        rate_limits: .payload.rate_limits,
+        pricing: {
+          status: $pricing_status,
+          last_updated: $pricing_updated,
+          stale: ($pricing_stale == "true"),
+          file: $pricing_file,
+          usd_per_1m_tokens: {
+            input: $usd_input_rate,
+            cached_input: $usd_cached_rate,
+            output: $usd_output_rate
+          },
+          codex_credits_per_1m_tokens: {
+            input: $credit_input_rate,
+            cached_input: $credit_cached_rate,
+            output: $credit_output_rate
+          }
+        },
+        cost: {
+          last_usd: $last_usd,
+          session_usd: $total_usd,
+          last_credits: $last_credits,
+          session_credits: $total_credits
+        }
+      }'
+    ;;
+  full)
+    echo "TokenHUD"
+    echo "adapter: codex model: $model provider: $provider version: $cli_version session: $session_short age: $age"
+    echo "cwd: $short_cwd"
+    echo "git: $git_info"
+    echo "context: $bar $(percent "$ctx_pct") last=$(short_num "$last_total") window=$(short_num "$context_window")"
+    echo "last tokens: input=$(short_num "$last_input") cached=$(short_num "$last_cached") output=$(short_num "$last_output") reasoning=$(short_num "$last_reasoning") total=$(short_num "$last_total")"
+    echo "session tokens: input=$(short_num "$total_input") cached=$(short_num "$total_cached") output=$(short_num "$total_output") reasoning=$(short_num "$total_reasoning") total=$(short_num "$total_total")"
+    echo "cost estimate: last=$(money "$last_usd") / $(credit_fmt "$last_credits") session=$(money "$total_usd") / $(credit_fmt "$total_credits")"
+    echo "rates per 1M: input=$usd_input_rate cached=$usd_cached_rate output=$usd_output_rate USD; input=$credit_input_rate cached=$credit_cached_rate output=$credit_output_rate credits; status=$pricing_status stale=$pricing_stale updated=$pricing_updated file=$price_config_file"
+    echo "rate limits: ${primary_window}m=${primary_used}% reset=$primary_reset_rel ${secondary_window}m=${secondary_used}% reset=$secondary_reset_rel plan=$plan_type"
+    ;;
+  compact|tmux)
+    style="$(env_or_compat TOKENHUD_STYLE CODEXHUD_STYLE balanced)"
+    if [ "$style" = "ascii" ]; then
+      bar="$(progress_bar "$ctx_pct" 10 1)"
+    fi
+    risk="$(risk_label "$ctx_pct")"
+    case "$style" in
+      minimal)
+        printf 'TH %s %s %s %s%s' \
+          "$(percent "$ctx_pct")" \
+          "$(money "$total_usd")" \
+          "$(credit_fmt "$total_credits")" \
+          "$git_info" \
+          "$(pricing_flag)"
+        ;;
+      ledger)
+        printf 'TH codex last %s/%s | session %s/%s | in %s out %s%s' \
+          "$(money "$last_usd")" \
+          "$(credit_fmt "$last_credits")" \
+          "$(money "$total_usd")" \
+          "$(credit_fmt "$total_credits")" \
+          "$(short_num "$total_input")" \
+          "$(short_num "$total_output")" \
+          "$(pricing_flag)"
+        ;;
+      risk)
+        printf 'TH %s %s %s  %s  lim %s/%s%%  %s%s' \
+          "$bar" \
+          "$(percent "$ctx_pct")" \
+          "$risk" \
+          "$(money "$total_usd")" \
+          "$primary_used" \
+          "$secondary_used" \
+          "$git_info" \
+          "$(pricing_flag)"
+        ;;
+      executive)
+        printf 'TokenHUD | adapter codex | ctx %s | session %s / %s | limits %s/%s%%%s' \
+          "$(percent "$ctx_pct")" \
+          "$(money "$total_usd")" \
+          "$(credit_fmt "$total_credits")" \
+          "$primary_used" \
+          "$secondary_used" \
+          "$(pricing_flag)"
+        ;;
+      focus)
+        printf 'TH %s %s %s%s' \
+          "$(percent "$ctx_pct")" \
+          "$risk" \
+          "$(money "$total_usd")" \
+          "$(pricing_flag)"
+        ;;
+      ascii|balanced|*)
+        printf 'TH codex:%s %s %s  $ %s/%s  cr %s/%s  lim %s/%s%%  %s%s' \
+          "$model" \
+          "$bar" \
+          "$(percent "$ctx_pct")" \
+          "$(plain_money "$last_usd")" \
+          "$(plain_money "$total_usd")" \
+          "$(credit_fmt "$last_credits")" \
+          "$(credit_fmt "$total_credits")" \
+          "$primary_used" \
+          "$secondary_used" \
+          "$git_info" \
+          "$(pricing_flag)"
+        ;;
+    esac
+    ;;
+esac
