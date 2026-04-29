@@ -1,0 +1,61 @@
+{
+  "session_file": "/home/user/.codex/sessions/2026/04/29/rollout-example.jsonl",
+  "timestamp": "2026-04-29T01:00:00Z",
+  "session": {
+    "id": "example-session-id",
+    "short_id": "example-",
+    "age": "42m",
+    "cli_version": "0.0.0",
+    "provider": "openai"
+  },
+  "model": "gpt-5.5",
+  "cwd": "/home/user/project",
+  "git": "main +11",
+  "context": {
+    "used_percentage": 80.7,
+    "window": 200000
+  },
+  "tokens": {
+    "last": {
+      "input_tokens": 12000,
+      "cached_input_tokens": 9000,
+      "output_tokens": 3000,
+      "reasoning_output_tokens": 1200,
+      "total_tokens": 15000
+    },
+    "total": {
+      "input_tokens": 6270000,
+      "cached_input_tokens": 5900000,
+      "output_tokens": 45200,
+      "reasoning_output_tokens": 18100,
+      "total_tokens": 6315200
+    }
+  },
+  "rate_limits": {
+    "primary": {
+      "used_percent": 9,
+      "window_minutes": 300
+    },
+    "secondary": {
+      "used_percent": 13,
+      "window_minutes": 10080
+    }
+  },
+  "pricing": {
+    "status": "configured",
+    "last_updated": "2026-04-29",
+    "stale": false,
+    "file": "/home/user/.codexhud/prices.json",
+    "usd_per_1m_tokens": {
+      "input": "5",
+      "cached_input": "0.5",
+      "output": "30"
+    }
+  },
+  "cost": {
+    "last_usd": "0.126000",
+    "session_usd": "7.500000",
+    "last_credits": "3.150000",
+    "session_credits": "187.500000"
+  }
+}

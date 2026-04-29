@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "last_updated": "2026-04-29",
+  "stale_after_days": 30,
+  "currency": "USD",
+  "unit": "per_1m_tokens",
+  "source_urls": [
+    "https://openai.com/api/pricing/",
+    "https://help.openai.com/en/articles/20001106-codex-rate-card"
+  ],
+  "models": {
+    "gpt-5.5": {
+      "usd_per_1m": { "input": 5, "cached_input": 0.5, "output": 30 },
+      "codex_credits_per_1m": { "input": 125, "cached_input": 12.5, "output": 750 },
+      "status": "configured"
+    },
+    "gpt-5.4": {
+      "usd_per_1m": { "input": 2.5, "cached_input": 0.25, "output": 15 },
+      "codex_credits_per_1m": { "input": 62.5, "cached_input": 6.25, "output": 375 },
+      "status": "configured"
+    },
+    "gpt-5.4-mini": {
+      "usd_per_1m": { "input": 0.75, "cached_input": 0.075, "output": 4.5 },
+      "codex_credits_per_1m": { "input": 18.75, "cached_input": 1.875, "output": 113 },
+      "status": "configured"
+    },
+    "gpt-5.3-codex": {
+      "usd_per_1m": { "input": 1.75, "cached_input": 0.175, "output": 14 },
+      "codex_credits_per_1m": { "input": 43.75, "cached_input": 4.375, "output": 350 },
+      "status": "configured"
+    },
+    "gpt-5.2": {
+      "usd_per_1m": { "input": 1.75, "cached_input": 0.175, "output": 14 },
+      "codex_credits_per_1m": { "input": 43.75, "cached_input": 4.375, "output": 350 },
+      "status": "configured"
+    },
+    "codex-auto-review": {
+      "usd_per_1m": { "input": 1.75, "cached_input": 0.175, "output": 14 },
+      "codex_credits_per_1m": { "input": 43.75, "cached_input": 4.375, "output": 350 },
+      "status": "configured"
+    },
+    "gpt-5.3-codex-spark": {
+      "usd_per_1m": { "input": 1.75, "cached_input": 0.175, "output": 14 },
+      "codex_credits_per_1m": { "input": 43.75, "cached_input": 4.375, "output": 350 },
+      "status": "provisional-gpt-5.3-codex"
+    }
+  }
+}
+
