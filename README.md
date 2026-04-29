@@ -77,7 +77,7 @@ TOKENHUD_SESSION_SCAN_LIMIT=0 # 0 scans all sessions when matching cwd
 TOKENHUD_LAUNCH_TMUX=1        # launch opens tmux when outside tmux
 TOKENHUD_LAUNCH_SESSION_PREFIX=tokenhud
 TOKENHUD_TMUX_STATUS=1        # launch sets a session-local tmux statusline
-TOKENHUD_TMUX_INTERVAL=5
+TOKENHUD_TMUX_INTERVAL=30
 TOKENHUD_TMUX_RIGHT_LENGTH=180
 CODEX_HOME=~/.codex          # override Codex home
 ```
@@ -92,9 +92,10 @@ a tmux session where TokenHUD can stay visible in the statusline:
 tokenhud launch codex
 ```
 
-The launcher sets a session-local tmux statusline for the AI CLI. It runs the
-command directly when already inside tmux. Outside tmux, it creates or attaches
-a per-directory session named like `tokenhud-codex-<key>`.
+The launcher sets a session-local tmux statusline for the AI CLI. When launched
+inside an existing tmux session, it restores the session's prior status options
+after the CLI exits. Outside tmux, it creates or attaches a per-directory
+session named like `tokenhud-codex-<key>`.
 
 Shell wrapper:
 
@@ -157,15 +158,15 @@ pricing registry, and distribution plan are in
 
 ## tmux
 
-Recommended: use `tokenhud launch <cli>`. That keeps TokenHUD scoped to the AI
-CLI session instead of running a global `status-right` command in every tmux
-pane.
+Recommended: use `tokenhud launch <cli>`. Keep your normal tmux global
+`status-right` clock-only; TokenHUD should not be added to global tmux config.
 
-Manual session-local status-right example:
+Manual current-session-only example:
 
 ```tmux
-set -g status-interval 5
-set -g status-right "#(TOKENHUD_STYLE=balanced ~/.local/bin/tokenhud status #{q:pane_current_path}) %H:%M"
+set-option status-interval 30
+set-option status-right-length 180
+set-option status-right "#(TOKENHUD_STYLE=balanced ~/.local/bin/tokenhud status #{q:pane_current_path}) %H:%M"
 ```
 
 Plugin-style entrypoint:
@@ -173,11 +174,12 @@ Plugin-style entrypoint:
 ```tmux
 set -g @tokenhud_style "risk"
 set -g @tokenhud_adapter "codex"
+# Required. Omit this to leave tmux status-right unchanged.
+set -g @tokenhud_scope "session"
 # Optional. If omitted, TokenHUD leaves your existing status-interval alone.
-set -g @tokenhud_interval "5"
+set -g @tokenhud_interval "30"
 set -g @tokenhud_right_length "180"
 # Optional. Use "global" only if you explicitly want every tmux session to run it.
-set -g @tokenhud_scope "session"
 run-shell "/path/to/TokenHUD/tmux/tokenhud.tmux"
 ```
 

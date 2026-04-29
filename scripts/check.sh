@@ -51,6 +51,62 @@ printf 'stub codex: unsupported arguments\n' >&2
 exit 2
 STUB
 chmod +x "$stub_bin/codex"
+cat >"$stub_bin/tmux" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -n "${TOKENHUD_FAKE_TMUX_LOG:-}" ]; then
+  printf '%s\n' "$*" >>"$TOKENHUD_FAKE_TMUX_LOG"
+fi
+
+if [ "${1:-}" = "show-option" ]; then
+  option="${*: -1}"
+  case "$option" in
+    @tokenhud_scope) printf '%s\n' "${TOKENHUD_FAKE_TMUX_SCOPE:-}" ;;
+    @codexhud_scope) printf '%s\n' "${CODEXHUD_FAKE_TMUX_SCOPE:-}" ;;
+    @tokenhud_binary|@codexhud_binary|@tokenhud_style|@codexhud_style|@tokenhud_adapter|@codexhud_adapter|@tokenhud_interval|@codexhud_interval|@tokenhud_right_length|@codexhud_right_length) ;;
+    status-right)
+      if [ "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_RIGHT_SET:-0}" = "1" ]; then
+        if [[ " $* " == *" -qv "* ]]; then
+          printf '%s\n' "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_RIGHT:-clock}"
+        else
+          printf 'status-right %s\n' "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_RIGHT:-clock}"
+        fi
+      fi
+      ;;
+    status-interval)
+      if [ "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_INTERVAL_SET:-0}" = "1" ]; then
+        if [[ " $* " == *" -qv "* ]]; then
+          printf '%s\n' "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_INTERVAL:-5}"
+        else
+          printf 'status-interval %s\n' "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_INTERVAL:-5}"
+        fi
+      fi
+      ;;
+    status-right-length)
+      if [ "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_LENGTH_SET:-0}" = "1" ]; then
+        if [[ " $* " == *" -qv "* ]]; then
+          printf '%s\n' "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_LENGTH:-80}"
+        else
+          printf 'status-right-length %s\n' "${TOKENHUD_FAKE_TMUX_LOCAL_STATUS_LENGTH:-80}"
+        fi
+      fi
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = "set-option" ]; then
+  exit 0
+fi
+
+if [ "${1:-}" = "has-session" ]; then
+  exit 1
+fi
+
+exit 0
+STUB
+chmod +x "$stub_bin/tmux"
 export PATH="$stub_bin:$PATH"
 
 "$bin" styles >/dev/null
@@ -62,6 +118,74 @@ TOKENHUD_LAUNCH_TMUX=0 TOKENHUD_TMUX_STATUS=0 "$bin" launch true >/dev/null
 "$bin" init bash >/dev/null
 "$bin" init zsh >/dev/null
 "$compat_bin" --version >/dev/null
+
+tmux_log="$tmp_dir/tmux.log"
+: >"$tmux_log"
+TOKENHUD_FAKE_TMUX_LOG="$tmux_log" "$repo_dir/tmux/tokenhud.tmux"
+if grep -q 'set-option.*status-right' "$tmux_log"; then
+  printf 'expected tmux plugin without @tokenhud_scope to leave status-right unchanged\n' >&2
+  exit 1
+fi
+
+: >"$tmux_log"
+TOKENHUD_FAKE_TMUX_LOG="$tmux_log" TOKENHUD_FAKE_TMUX_SCOPE=session "$repo_dir/tmux/tokenhud.tmux"
+grep -q 'set-option status-right-length 180' "$tmux_log" || {
+  printf 'expected tmux plugin session scope to set status-right-length 180\n' >&2
+  exit 1
+}
+grep -q 'set-option status-right #' "$tmux_log" || {
+  printf 'expected tmux plugin session scope to set status-right\n' >&2
+  exit 1
+}
+
+: >"$tmux_log"
+TMUX=/tmp/tokenhud-fake-tmux TOKENHUD_FAKE_TMUX_LOG="$tmux_log" "$bin" launch true >/dev/null
+grep -q 'set-option status-interval 30' "$tmux_log" || {
+  printf 'expected launch inside tmux to default status-interval to 30\n' >&2
+  exit 1
+}
+grep -q 'set-option -u status-right' "$tmux_log" || {
+  printf 'expected launch inside tmux to restore inherited status-right\n' >&2
+  exit 1
+}
+
+: >"$tmux_log"
+TMUX=/tmp/tokenhud-fake-tmux \
+  TOKENHUD_FAKE_TMUX_LOG="$tmux_log" \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_RIGHT_SET=1 \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_RIGHT='CLOCK' \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_INTERVAL_SET=1 \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_INTERVAL=7 \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_LENGTH_SET=1 \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_LENGTH=90 \
+  "$bin" launch true >/dev/null
+grep -q 'set-option status-right CLOCK' "$tmux_log" || {
+  printf 'expected launch inside tmux to restore a pre-existing non-TokenHUD status-right\n' >&2
+  exit 1
+}
+grep -q 'set-option status-interval 7' "$tmux_log" || {
+  printf 'expected launch inside tmux to restore a pre-existing status-interval\n' >&2
+  exit 1
+}
+
+: >"$tmux_log"
+TMUX=/tmp/tokenhud-fake-tmux \
+  TOKENHUD_FAKE_TMUX_LOG="$tmux_log" \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_RIGHT_SET=1 \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_RIGHT='#(tokenhud status)' \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_INTERVAL_SET=1 \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_INTERVAL=5 \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_LENGTH_SET=1 \
+  TOKENHUD_FAKE_TMUX_LOCAL_STATUS_LENGTH=180 \
+  "$bin" launch true >/dev/null
+grep -q 'set-option -u status-right' "$tmux_log" || {
+  printf 'expected launch inside tmux to clear a stale TokenHUD status-right\n' >&2
+  exit 1
+}
+grep -q 'set-option -u status-interval' "$tmux_log" || {
+  printf 'expected launch inside tmux to clear stale TokenHUD status-interval\n' >&2
+  exit 1
+}
 
 cache_key="$("$bin" cache-key /tmp/tokenhud-target)"
 case "$cache_key" in

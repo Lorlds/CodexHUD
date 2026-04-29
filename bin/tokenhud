@@ -66,7 +66,7 @@ Environment:
   TOKENHUD_LAUNCH_TMUX   set to 0 to disable launch auto-tmux, default 1
   TOKENHUD_LAUNCH_SESSION_PREFIX tmux session prefix for launch, default tokenhud
   TOKENHUD_TMUX_STATUS   set to 0 to disable launch session statusline, default 1
-  TOKENHUD_TMUX_INTERVAL tmux status interval for launch sessions, default 5
+  TOKENHUD_TMUX_INTERVAL tmux status interval for launch sessions, default 30
   TOKENHUD_TMUX_RIGHT_LENGTH tmux right status width for launch sessions, default 180
 
 Compatibility:
@@ -143,8 +143,8 @@ enable_tmux_status() {
   [ "$(env_or_compat TOKENHUD_TMUX_STATUS CODEXHUD_TMUX_STATUS 1)" != "0" ] || return 0
   command -v tmux >/dev/null 2>&1 || return 0
 
-  interval="$(env_or_compat TOKENHUD_TMUX_INTERVAL CODEXHUD_TMUX_INTERVAL 5)"
-  case "$interval" in ''|*[!0-9]*) interval=5 ;; esac
+  interval="$(env_or_compat TOKENHUD_TMUX_INTERVAL CODEXHUD_TMUX_INTERVAL 30)"
+  case "$interval" in ''|*[!0-9]*) interval=30 ;; esac
   length="$(env_or_compat TOKENHUD_TMUX_RIGHT_LENGTH CODEXHUD_TMUX_RIGHT_LENGTH 180)"
   case "$length" in ''|*[!0-9]*) length=180 ;; esac
   right="$(tmux_status_right "$adapter")"
@@ -158,6 +158,78 @@ enable_tmux_status() {
     tmux set-option status-interval "$interval" >/dev/null 2>&1 || return 1
     tmux set-option status-right-length "$length" >/dev/null 2>&1 || return 1
   fi
+}
+
+tmux_local_option_line() {
+  local option="$1"
+  tmux show-option -q "$option" 2>/dev/null || true
+}
+
+tmux_local_option_value() {
+  local option="$1"
+  tmux show-option -qv "$option" 2>/dev/null || true
+}
+
+restore_tmux_current_status() {
+  local had_right="$1" old_right="$2" had_interval="$3" old_interval="$4" had_length="$5" old_length="$6"
+
+  if [ "$had_right" = "1" ]; then
+    tmux set-option status-right "$old_right" >/dev/null 2>&1 || true
+  else
+    tmux set-option -u status-right >/dev/null 2>&1 || true
+  fi
+  if [ "$had_interval" = "1" ]; then
+    tmux set-option status-interval "$old_interval" >/dev/null 2>&1 || true
+  else
+    tmux set-option -u status-interval >/dev/null 2>&1 || true
+  fi
+  if [ "$had_length" = "1" ]; then
+    tmux set-option status-right-length "$old_length" >/dev/null 2>&1 || true
+  else
+    tmux set-option -u status-right-length >/dev/null 2>&1 || true
+  fi
+}
+
+tmux_status_is_managed() {
+  case "$1" in
+    *tokenhud*|*codexhud*|*TokenHUD*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+run_with_current_tmux_status() {
+  local cli="$1" status_code=0
+  shift || true
+
+  if [ "$(env_or_compat TOKENHUD_TMUX_STATUS CODEXHUD_TMUX_STATUS 1)" = "0" ] || ! command -v tmux >/dev/null 2>&1; then
+    exec "$cli" "$@"
+  fi
+
+  local had_right=0 old_right="" had_interval=0 old_interval="" had_length=0 old_length=""
+  if [ -n "$(tmux_local_option_line status-right)" ]; then
+    had_right=1
+    old_right="$(tmux_local_option_value status-right)"
+    if tmux_status_is_managed "$old_right"; then
+      had_right=0
+    fi
+  fi
+  if [ -n "$(tmux_local_option_line status-interval)" ]; then
+    had_interval=1
+    old_interval="$(tmux_local_option_value status-interval)"
+  fi
+  if [ -n "$(tmux_local_option_line status-right-length)" ]; then
+    had_length=1
+    old_length="$(tmux_local_option_value status-right-length)"
+  fi
+  if tmux_status_is_managed "$old_right"; then
+    had_interval=0
+    had_length=0
+  fi
+
+  enable_tmux_status "" "$cli" || true
+  "$cli" "$@" || status_code=$?
+  restore_tmux_current_status "$had_right" "$old_right" "$had_interval" "$old_interval" "$had_length" "$old_length"
+  exit "$status_code"
 }
 
 print_init() {
@@ -321,7 +393,7 @@ if [ "$mode" = "launch" ]; then
   fi
   if [ -n "${TMUX:-}" ] || [ "$(env_or_compat TOKENHUD_LAUNCH_TMUX CODEXHUD_LAUNCH_TMUX 1)" = "0" ] || ! command -v tmux >/dev/null 2>&1; then
     if [ -n "${TMUX:-}" ]; then
-      enable_tmux_status "" "$cli" || true
+      run_with_current_tmux_status "$cli" "$@"
     fi
     exec "$cli" "$@"
   fi

@@ -28,10 +28,10 @@ esac
 
 scope="$(tmux show-option -gqv @tokenhud_scope)"
 [ -z "$scope" ] && scope="$(tmux show-option -gqv @codexhud_scope)"
-[ -z "$scope" ] && scope="session"
 case "$scope" in
   global) option_scope=(-g) ;;
-  *) option_scope=() ;;
+  session) option_scope=() ;;
+  *) exit 0 ;;
 esac
 
 existing="$(tmux show-option "${option_scope[@]}" -qv status-right)"
