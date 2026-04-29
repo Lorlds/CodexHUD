@@ -32,6 +32,7 @@ usage() {
 usage: tokenhud [tmux|compact|full|json|models|styles|adapters] [cwd] [SESSION_JSONL]
        tokenhud init [bash|zsh]
        tokenhud launch <cli> [args...]
+       tokenhud status [cwd]
        tokenhud cache-refresh [cwd]
        tokenhud prices-check
        tokenhud --version
@@ -70,7 +71,7 @@ EOF
 
 mode="${1:-tmux}"
 case "$mode" in
-  tmux|compact|full|json|models|styles|adapters|init|launch|cache-refresh|cache-key|prices-check) shift || true ;;
+  tmux|compact|full|json|models|styles|adapters|init|launch|status|cache-refresh|cache-key|prices-check) shift || true ;;
   -h|--help) usage; exit 0 ;;
   -V|--version|version) printf 'tokenhud %s\n' "$version"; exit 0 ;;
   *)
@@ -371,6 +372,29 @@ file_mtime() {
 cache_gc() {
   find "$cache_dir" -type f -name 'prompt-*.txt' -mtime +30 -delete 2>/dev/null || true
 }
+
+if [ "$mode" = "status" ]; then
+  status_cwd="${cwd_arg:-$PWD}"
+  status_cache="$(env_or_compat TOKENHUD_CACHE_FILE CODEXHUD_CACHE_FILE "$(cache_file_for_cwd "$status_cwd")")"
+  status_cache_dir="${status_cache%/*}"
+  mkdir -p "$status_cache_dir" 2>/dev/null || true
+
+  line=""
+  if [ -r "$status_cache" ]; then
+    IFS= read -r line <"$status_cache" || true
+  fi
+  [ -n "$line" ] && printf '%s\n' "$line"
+
+  ttl="$(env_or_compat TOKENHUD_CACHE_TTL CODEXHUD_CACHE_TTL 2)"
+  case "$ttl" in ''|*[!0-9]*) ttl=2 ;; esac
+  now="$(date +%s)"
+  mtime="$(file_mtime "$status_cache")"
+  if [ "$((now - mtime))" -ge "$ttl" ]; then
+    : >"$status_cache" 2>/dev/null || true
+    ( TOKENHUD_CACHE_FILE="$status_cache" "$0" cache-refresh "$status_cwd" >/dev/null 2>&1 ) &
+  fi
+  exit 0
+fi
 
 if [ "$mode" = "cache-refresh" ]; then
   require_commands jq awk git find sort tail date

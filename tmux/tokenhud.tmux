@@ -17,7 +17,7 @@ case "$interval" in
 esac
 
 existing="$(tmux show-option -gqv status-right)"
-printf -v segment '#(TOKENHUD_STYLE=%q %q tmux #{q:pane_current_path})' "$style" "$binary"
+printf -v segment '#(TOKENHUD_STYLE=%q %q status #{q:pane_current_path})' "$style" "$binary"
 
 [ -z "$interval" ] || tmux set-option -g status-interval "$interval" >/dev/null
 case "$existing" in

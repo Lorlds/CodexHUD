@@ -49,6 +49,7 @@ tokenhud models
 tokenhud prices-check
 tokenhud styles
 tokenhud launch codex
+tokenhud status
 tokenhud init bash
 tokenhud init zsh
 ```
@@ -153,7 +154,7 @@ One-line status-right example:
 
 ```tmux
 set -g status-interval 5
-set -g status-right "#{?#{==:#{pane_current_command},codex},#(TOKENHUD_STYLE=balanced ~/.local/bin/tokenhud tmux #{q:pane_current_path}) ,}%H:%M"
+set -g status-right "#{?#{==:#{pane_current_command},codex},#(TOKENHUD_STYLE=balanced ~/.local/bin/tokenhud status #{q:pane_current_path}) ,}%H:%M"
 ```
 
 Plugin-style entrypoint:
